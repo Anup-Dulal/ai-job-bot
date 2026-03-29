@@ -12,18 +12,26 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
 def send_telegram(message: str) -> bool:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         log.warning("Telegram not configured — skipping notification")
+        log.warning(f"Token present: {bool(token)}, Chat ID present: {bool(chat_id)}")
         return False
     try:
         resp = httpx.post(
             TELEGRAM_API.format(token=token),
-            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True},
+            json={
+                "chat_id": int(chat_id),  # ensure it's an integer
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.is_success:
+            log.error(f"Telegram API error: {resp.status_code} — {resp.text}")
+            return False
         return True
     except Exception as e:
         log.error(f"Telegram error: {e}")
