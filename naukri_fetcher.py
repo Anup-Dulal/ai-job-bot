@@ -1,11 +1,11 @@
 """
-naukri_fetcher.py — AI-powered job search using Groq + Google Custom Search.
-Groq reads the resume and generates smart search queries.
-Google Custom Search finds fresh Naukri/LinkedIn job listings.
-Free: 100 Google searches/day, unlimited Groq.
+job_fetcher.py — Fetch jobs from LinkedIn public guest API.
+No API key needed, no login, works from any server including Railway.
+Groq generates smart search keywords from your resume.
 """
 
 import os
+import re
 import httpx
 import logging
 import json
@@ -14,100 +14,113 @@ from llm_client import call_llm
 
 log = logging.getLogger("JobFetcher")
 
-GOOGLE_SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
+LINKEDIN_GUEST_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
-def generate_search_queries() -> list:
-    """
-    Ask Groq to generate smart job search queries based on the resume.
-    Falls back to hardcoded queries if Groq unavailable.
-    """
-    prompt = f"""Based on this resume, generate 5 Google search queries to find the best matching jobs on Naukri.
-    Focus on: role titles, key skills, experience level, location.
-    Return ONLY a JSON array of 5 query strings. Each query should be specific and include site:naukri.com.
-    
-    Resume:
-    {get_resume_text()}
-    
-    Example format: ["site:naukri.com java backend developer noida 3-5 years", ...]
-    Return ONLY the JSON array."""
+def generate_keywords() -> list:
+    """Ask Groq to generate best job search keywords from resume."""
+    prompt = f"""Based on this resume, generate 4 job search keyword phrases for LinkedIn job search in India.
+Focus on role titles and key skills. Keep each phrase short (2-4 words max).
+Return ONLY a JSON array of 4 strings.
 
-    result = call_llm(prompt, max_tokens=300, json_mode=False)
+Resume:
+{get_resume_text()}
+
+Example: ["Java Backend Developer", "Spring Boot Microservices", "Java Software Engineer", "Backend Engineer Java"]
+Return ONLY the JSON array."""
+
+    result = call_llm(prompt, max_tokens=150, json_mode=False)
     if result:
         try:
-            # extract JSON array from response
             start = result.find('[')
             end = result.rfind(']') + 1
             if start >= 0 and end > start:
-                queries = json.loads(result[start:end])
-                if isinstance(queries, list) and len(queries) > 0:
-                    log.info(f"Groq generated {len(queries)} search queries")
-                    return queries
+                keywords = json.loads(result[start:end])
+                if isinstance(keywords, list) and len(keywords) > 0:
+                    log.info(f"Groq generated keywords: {keywords}")
+                    return keywords
         except Exception as e:
-            log.warning(f"Could not parse Groq queries: {e}")
+            log.warning(f"Could not parse Groq keywords: {e}")
 
-    # Fallback: build queries from resume directly
-    roles = RESUME["ideal_job"]["roles"][:3]
-    locations = RESUME["ideal_job"]["locations"][:2]
-    queries = []
-    for role in roles:
-        for loc in locations[:2]:
-            queries.append(f"site:naukri.com {role} {loc} {RESUME['experience_years']} years")
-    log.info(f"Using {len(queries)} fallback search queries")
-    return queries[:5]
+    # Fallback from resume
+    return [r for r in RESUME["ideal_job"]["roles"][:4]]
 
 
-def search_google(query: str) -> list:
-    """Search Google Custom Search API for job listings."""
-    api_key = os.getenv("GOOGLE_API_KEY", "")
-    cx = os.getenv("GOOGLE_CX", "")
+def parse_jobs_html(html: str) -> list:
+    """Parse LinkedIn job cards from HTML response."""
+    jobs = []
+    # Extract job cards
+    cards = re.findall(r'data-entity-urn="urn:li:jobPosting:(\d+)".*?</li>', html, re.DOTALL)
 
-    if not api_key or not cx:
-        log.warning("GOOGLE_API_KEY or GOOGLE_CX not set")
-        return []
+    # Simpler approach - find all job postings
+    job_ids = re.findall(r'urn:li:jobPosting:(\d+)', html)
+    titles = re.findall(r'base-search-card__title[^>]*>\s*([^<]+)', html)
+    companies = re.findall(r'base-search-card__subtitle[^>]*>.*?<a[^>]*>([^<]+)', html, re.DOTALL)
+    locations = re.findall(r'job-search-card__location[^>]*>([^<]+)', html)
 
+    for i, job_id in enumerate(job_ids[:10]):
+        title = titles[i].strip() if i < len(titles) else ""
+        company = companies[i].strip() if i < len(companies) else ""
+        location = locations[i].strip() if i < len(locations) else ""
+        if title:
+            jobs.append({
+                "id": job_id,
+                "title": title,
+                "company": company,
+                "location": location,
+                "description": f"{title} at {company} in {location}",
+                "apply_url": f"https://www.linkedin.com/jobs/view/{job_id}",
+                "posted": "",
+            })
+    return jobs
+
+
+def fetch_jobs(keyword: str, location: str = "India") -> list:
+    """Fetch jobs from LinkedIn guest API."""
+    params = {
+        "keywords": keyword,
+        "location": location,
+        "geoId": "102713980",  # India
+        "f_TPR": "r604800",    # last 7 days
+        "f_E": "3,4",          # mid-senior level
+        "position": 1,
+        "pageNum": 0,
+    }
     try:
-        resp = httpx.get(
-            GOOGLE_SEARCH_URL,
-            params={"key": api_key, "cx": cx, "q": query, "num": 10},
-            timeout=15,
-        )
+        resp = httpx.get(LINKEDIN_GUEST_URL, params=params, headers=HEADERS, timeout=20)
         resp.raise_for_status()
-        items = resp.json().get("items", [])
-        jobs = []
-        for item in items:
-            link = item.get("link", "")
-            if "naukri.com" in link and "/job-listings-" in link:
-                jobs.append({
-                    "id": link.split("-")[-1].split("?")[0],
-                    "title": item.get("title", "").replace(" - Naukri.com", ""),
-                    "company": "",
-                    "location": "",
-                    "description": item.get("snippet", ""),
-                    "apply_url": link,
-                    "posted": "",
-                })
-        log.info(f"Google: {len(jobs)} Naukri jobs for '{query}'")
+        jobs = parse_jobs_html(resp.text)
+        log.info(f"LinkedIn: {len(jobs)} jobs for '{keyword}'")
         return jobs
     except Exception as e:
-        log.error(f"Google search error: {e}")
+        log.error(f"LinkedIn fetch error: {e}")
         return []
 
 
 def fetch_all_jobs() -> list:
-    """Main entry: Groq generates queries → Google finds jobs → return list."""
-    queries = generate_search_queries()
+    """Main entry: Groq generates keywords → LinkedIn finds jobs → return list."""
+    keywords = generate_keywords()
+    locations = RESUME["ideal_job"]["locations"][:3]
     max_per_run = int(os.getenv("MAX_JOBS_PER_RUN", "30"))
 
     seen_ids = set()
     all_jobs = []
 
-    for query in queries:
-        jobs = search_google(query)
-        for job in jobs:
-            if job["id"] and job["id"] not in seen_ids:
-                seen_ids.add(job["id"])
-                all_jobs.append(job)
+    for keyword in keywords:
+        for location in locations[:2]:
+            jobs = fetch_jobs(keyword.strip(), location.strip())
+            for job in jobs:
+                if job["id"] and job["id"] not in seen_ids:
+                    seen_ids.add(job["id"])
+                    all_jobs.append(job)
+            if len(all_jobs) >= max_per_run:
+                break
         if len(all_jobs) >= max_per_run:
             break
 
