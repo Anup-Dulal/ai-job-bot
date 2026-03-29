@@ -1,0 +1,41 @@
+services:
+  - type: worker
+    name: ai-job-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scheduler.py
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: PROFILE_NAME
+        sync: false
+      - key: PROFILE_EMAIL
+        sync: false
+      - key: PROFILE_PHONE
+        sync: false
+      - key: PROFILE_LOCATION
+        sync: false
+      - key: PROFILE_EXP_YEARS
+        sync: false
+      - key: PROFILE_TITLE
+        sync: false
+      - key: PROFILE_NOTICE
+        sync: false
+      - key: PROFILE_CTC_EXP
+        sync: false
+      - key: PROFILE_GITHUB
+        sync: false
+      - key: SEARCH_KEYWORDS
+        sync: false
+      - key: SEARCH_LOCATIONS
+        sync: false
+      - key: MAX_JOBS_PER_RUN
+        value: "30"
+      - key: MIN_FIT_SCORE
+        value: "60"
+      - key: SCHEDULE_MINUTES
+        value: "60"
