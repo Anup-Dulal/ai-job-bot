@@ -2,7 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python main.py"
-healthcheckPath = "/"
-healthcheckTimeout = 30
+startCommand = "python scheduler.py"
 restartPolicyType = "on_failure"
