@@ -36,18 +36,9 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-NAUKRI_API_HEADERS = {
-    "User-Agent": HEADERS["User-Agent"],
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.naukri.com/",
-    "appid": "109",
-    "systemid": "109",
-}
-
 LINKEDIN_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 LINKEDIN_JOB_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
-NAUKRI_API_URL = "https://www.naukri.com/jobapi/v3/search"
+NAUKRI_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
 INDEED_URL = "https://www.indeed.com/jobs"
 
 
@@ -256,61 +247,94 @@ def fetch_indeed_remote(keyword: str) -> list[dict]:
 
 
 def fetch_naukri(keyword: str, location: str) -> list[dict]:
-    """Fetch from Naukri using their JSON search API."""
-    try:
-        params = {
-            "noOfResults": 20,
-            "urlType": "search_by_keyword",
-            "searchType": "adv",
-            "keyword": keyword,
-            "location": location,
-            "experience": "3",
-            "k": keyword,
-            "l": location,
-            "sort": "1",  # sort by date
-        }
-        resp = httpx.get(
-            NAUKRI_API_URL,
-            params=params,
-            headers=NAUKRI_API_HEADERS,
-            timeout=20,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        job_details = data.get("jobDetails", [])
-        jobs = []
-        for idx, item in enumerate(job_details[:10]):
-            company = item.get("companyName", "")
-            if not company or is_excluded(company):
-                continue
-            title = item.get("title", "")
-            job_id = item.get("jobId", f"naukri_{idx}")
-            loc = item.get("placeholders", [{}])
-            location_str = loc[0].get("label", location) if loc else location
-            desc_parts = [item.get("jobDescription", "")]
-            for ph in item.get("placeholders", []):
-                if ph.get("type") == "experience":
-                    desc_parts.append(f"Experience: {ph.get('label', '')}")
-            description = " ".join(filter(None, desc_parts))
-            apply_url = f"https://www.naukri.com{item.get('jdURL', '')}" if item.get("jdURL") else ""
-            days_ago = item.get("footerPlaceholderLabel", "")
-            jobs.append({
-                "id": f"naukri_{job_id}",
-                "title": title,
-                "company": company,
-                "location": location_str,
-                "description": _clean(description),
-                "apply_url": apply_url,
-                "posted": days_ago,
-                "days_ago": freshness_score(days_ago),
-                "source": "Naukri",
-            })
-        log.info("Naukri fetched %s jobs for %s/%s", len(jobs), keyword, location)
-        return jobs
-    except Exception as exc:
-        log.warning("Naukri API fetch failed for %s/%s: %s", keyword, location, exc)
+    """Fetch from Naukri using HTML scraping with current selectors."""
+    keyword_slug = keyword.lower().replace(" ", "-")
+    location_slug = location.lower().replace(" ", "-")
+    url = f"https://www.naukri.com/{quote_plus(keyword_slug)}-jobs-in-{quote_plus(location_slug)}"
+    html = _http_get(url)
+    if not html:
         return []
+
+    jobs = []
+    # Naukri embeds job data as JSON in a script tag
+    json_match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});', html, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            job_list = (
+                data.get("jobsData", {}).get("jobDetails", [])
+                or data.get("initialState", {}).get("jobsData", {}).get("jobDetails", [])
+            )
+            for idx, item in enumerate(job_list[:15]):
+                company = item.get("companyName", "")
+                if not company or is_excluded(company):
+                    continue
+                title = item.get("title", "")
+                job_id = item.get("jobId", f"naukri_{idx}")
+                loc_list = item.get("placeholders", [])
+                location_str = next(
+                    (p.get("label", "") for p in loc_list if p.get("type") == "location"),
+                    location,
+                )
+                exp_str = next(
+                    (p.get("label", "") for p in loc_list if p.get("type") == "experience"),
+                    "",
+                )
+                description = item.get("jobDescription", "") or item.get("tagsAndSkills", "")
+                if exp_str:
+                    description = f"{description} Experience: {exp_str}".strip()
+                apply_url = f"https://www.naukri.com{item.get('jdURL', '')}" if item.get("jdURL") else ""
+                posted = item.get("footerPlaceholderLabel", "")
+                jobs.append({
+                    "id": f"naukri_{job_id}",
+                    "title": title,
+                    "company": company,
+                    "location": location_str or location,
+                    "description": _clean(description),
+                    "apply_url": apply_url,
+                    "posted": posted,
+                    "days_ago": freshness_score(posted),
+                    "source": "Naukri",
+                    "easy_apply": True,
+                })
+            if jobs:
+                log.info("Naukri JSON: %s jobs for %s/%s", len(jobs), keyword, location)
+                return jobs
+        except Exception as exc:
+            log.warning("Naukri JSON parse failed for %s/%s: %s", keyword, location, exc)
+
+    # Fallback: regex scraping on HTML
+    # Try multiple card patterns Naukri has used
+    cards = (
+        re.findall(r'(<article[^>]+class="[^"]*jobTuple[^"]*"[\s\S]*?</article>)', html)
+        or re.findall(r'(<div[^>]+class="[^"]*job-tuple[^"]*"[\s\S]*?</div>\s*</div>)', html)
+    )
+    for idx, card in enumerate(cards[:15]):
+        title_match = re.search(r'(?:title|data-job-title)="([^"]+)"', card)
+        company_match = re.search(r'class="[^"]*(?:comp-name|company-name)[^"]*"[^>]*>\s*([^<]+)', card)
+        link_match = re.search(r'href="(https://www\.naukri\.com/job-listings[^"]+)"', card)
+        location_match = re.search(r'class="[^"]*(?:locWdth|location)[^"]*"[^>]*>\s*([^<]+)', card)
+        exp_match = re.search(r'class="[^"]*(?:expwdth|experience)[^"]*"[^>]*>\s*([^<]+)', card)
+        desc_match = re.search(r'class="[^"]*(?:job-desc|description)[^"]*"[^>]*>\s*([^<]+)', card)
+        company = _clean(company_match.group(1) if company_match else "")
+        if not company or is_excluded(company):
+            continue
+        jobs.append({
+            "id": f"naukri_{quote_plus(keyword_slug)}_{quote_plus(location_slug)}_{idx}",
+            "title": _clean(title_match.group(1) if title_match else ""),
+            "company": company,
+            "location": _clean(location_match.group(1) if location_match else location),
+            "description": _clean(desc_match.group(1) if desc_match else ""),
+            "apply_url": link_match.group(1) if link_match else "",
+            "posted": "",
+            "days_ago": 3,
+            "experience": _clean(exp_match.group(1) if exp_match else ""),
+            "source": "Naukri",
+            "easy_apply": True,
+        })
+
+    log.info("Naukri HTML: %s jobs for %s/%s", len(jobs), keyword, location)
+    return jobs
 
 
 
