@@ -81,7 +81,9 @@ def poll_and_process() -> None:
 
         for update in updates:
             update_id = update.get("update_id", 0)
-            offset = update_id + 1  # advance offset so we don't re-process
+            # Advance offset immediately so we never re-process this update
+            if offset is None or update_id >= offset:
+                offset = update_id + 1
 
             if update_id in processed:
                 continue

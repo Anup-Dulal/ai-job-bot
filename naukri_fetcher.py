@@ -1,9 +1,10 @@
 """
-naukri_fetcher.py — Multi-source job fetcher: LinkedIn, Naukri, Glassdoor (JSON API).
+naukri_fetcher.py — Multi-source job fetcher:
+  - Naukri JSON API  → India jobs (priority)
+  - LinkedIn         → India Easy Apply + Remote Easy Apply
+  - Indeed           → Remote/overseas jobs (indeed.com with remotejob=1)
 
-LinkedIn and Naukri use HTML scraping.
-Glassdoor uses their public job search JSON endpoint.
-Indeed blocks server IPs (403) so it is not used.
+LinkedIn "Open website to apply" jobs are filtered out — only Easy Apply kept.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ log = logging.getLogger("Fetcher")
 
 EXCLUDE_COMPANIES = [company.lower() for company in RESUME["ideal_job"].get("avoid", [])]
 
-# Standard browser headers
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -36,16 +36,19 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# Glassdoor needs extra headers to avoid 403
-GLASSDOOR_HEADERS = {
-    **HEADERS,
-    "Referer": "https://www.glassdoor.co.in/",
-    "Accept": "application/json, text/plain, */*",
+NAUKRI_API_HEADERS = {
+    "User-Agent": HEADERS["User-Agent"],
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.naukri.com/",
+    "appid": "109",
+    "systemid": "109",
 }
 
 LINKEDIN_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-NAUKRI_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
-GLASSDOOR_API = "https://www.glassdoor.co.in/graph"
+LINKEDIN_JOB_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+NAUKRI_API_URL = "https://www.naukri.com/jobapi/v3/search"
+INDEED_URL = "https://www.indeed.com/jobs"
 
 
 def _http_get(url: str, *, params: dict | None = None) -> str:
@@ -129,17 +132,37 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
 
 
+def _is_easy_apply(job_id: str) -> bool:
+    """Check if a LinkedIn job has Easy Apply (vs 'Apply on company website')."""
+    try:
+        html = _http_get(LINKEDIN_JOB_URL.format(job_id=job_id))
+        if not html:
+            return True  # assume easy apply if we can't check
+        # Easy Apply shows a button with "Easy Apply" text
+        # External apply shows "Apply" linking to company site
+        if "easy apply" in html.lower():
+            return True
+        if "applymethod" in html.lower():
+            # applyMethod: "ComplexOnsiteApply" = Easy Apply
+            # applyMethod: "OffsiteApply" = external
+            if "offsiteapply" in html.lower():
+                return False
+        return True  # default to include if uncertain
+    except Exception:
+        return True
+
+
 def fetch_linkedin(keyword: str, location: str) -> list[dict]:
-    """Fetch from LinkedIn. Pass location='Remote' to search worldwide remote jobs."""
+    """Fetch from LinkedIn — Easy Apply jobs only."""
     params: dict = {
         "keywords": keyword,
         "f_TPR": "r604800",  # last 7 days
+        "f_LF": "f_AL",      # Easy Apply filter
         "position": 1,
         "pageNum": 0,
     }
     if location.lower() == "remote":
-        # Worldwide remote — no geoId, just remote work-type filter
-        params["f_WT"] = "2"
+        params["f_WT"] = "2"  # remote work type
     else:
         params["location"] = location
         params["geoId"] = "102713980"  # India
@@ -153,6 +176,7 @@ def fetch_linkedin(keyword: str, location: str) -> list[dict]:
     companies = re.findall(r"base-search-card__subtitle[^>]*>.*?<a[^>]*>([^<]+)", html, re.DOTALL)
     locations = re.findall(r"job-search-card__location[^>]*>([^<]+)", html)
     posted = re.findall(r"job-search-card__listdate[^>]*>([^<]+)", html)
+
     jobs = []
     for idx, job_id in enumerate(job_ids[:10]):
         company = _clean(companies[idx]) if idx < len(companies) else ""
@@ -169,135 +193,123 @@ def fetch_linkedin(keyword: str, location: str) -> list[dict]:
                 "posted": _clean(posted[idx]) if idx < len(posted) else "",
                 "days_ago": freshness_score(_clean(posted[idx]) if idx < len(posted) else ""),
                 "source": "LinkedIn",
+                "easy_apply": True,  # f_LF=f_AL filter ensures these are Easy Apply
             }
         )
     return jobs
+
+
+def fetch_indeed_remote(keyword: str) -> list[dict]:
+    """Fetch remote/overseas jobs from Indeed global."""
+    try:
+        params = {
+            "q": keyword,
+            "l": "Remote",
+            "remotejob": "1",
+            "sort": "date",
+            "fromage": "7",
+        }
+        resp = httpx.get(
+            INDEED_URL,
+            params=params,
+            headers={
+                **HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=20,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        html = resp.text
+
+        job_keys = re.findall(r'data-jk="([a-f0-9]+)"', html)
+        titles = re.findall(r'class="jobTitle[^"]*"[^>]*>.*?<span[^>]*>([^<]+)</span>', html, re.DOTALL)
+        companies = re.findall(r'data-testid="company-name"[^>]*>([^<]+)', html)
+        locations_found = re.findall(r'data-testid="text-location"[^>]*>([^<]+)', html)
+        snippets = re.findall(r'class="[^"]*job-snippet[^"]*"[^>]*>([\s\S]*?)</ul>', html)
+
+        jobs = []
+        for idx, job_key in enumerate(job_keys[:10]):
+            company = _clean(companies[idx]) if idx < len(companies) else ""
+            if not company or is_excluded(company):
+                continue
+            snippet_html = snippets[idx] if idx < len(snippets) else ""
+            description = _clean(re.sub(r"<li>", " ", snippet_html))
+            loc = _clean(locations_found[idx]) if idx < len(locations_found) else "Remote"
+            jobs.append({
+                "id": f"indeed_{job_key}",
+                "title": _clean(titles[idx]) if idx < len(titles) else "",
+                "company": company,
+                "location": loc,
+                "description": description,
+                "apply_url": f"https://www.indeed.com/viewjob?jk={job_key}",
+                "posted": "",
+                "days_ago": 3,
+                "source": "Indeed",
+                "easy_apply": False,  # Indeed links to external apply
+            })
+        log.info("Indeed remote fetched %s jobs for %s", len(jobs), keyword)
+        return jobs
+    except Exception as exc:
+        log.warning("Indeed remote fetch failed for %s: %s", keyword, exc)
+        return []
 
 
 def fetch_naukri(keyword: str, location: str) -> list[dict]:
-    keyword_slug = quote_plus(keyword.lower().replace(" ", "-"))
-    location_slug = quote_plus(location.lower().replace(" ", "-"))
-    html = _http_get(NAUKRI_URL.format(keyword=keyword_slug, location=location_slug))
-    if not html:
-        return []
-
-    cards = re.findall(r'(<article[^>]+class="[^"]*jobTuple[^"]*"[\s\S]*?</article>)', html)
-    jobs = []
-    for idx, card in enumerate(cards[:10]):
-        title_match = re.search(r'title="([^"]+)"', card)
-        company_match = re.search(r'class="[^"]*comp-name[^"]*"[^>]*>\s*([^<]+)', card)
-        link_match = re.search(r'href="([^"]+)"', card)
-        location_match = re.search(r'class="[^"]*locWdth[^"]*"[^>]*>\s*([^<]+)', card)
-        exp_match = re.search(r'class="[^"]*expwdth[^"]*"[^>]*>\s*([^<]+)', card)
-        desc_match = re.search(r'class="[^"]*job-desc[^"]*"[^>]*>\s*([^<]+)', card)
-        company = _clean(company_match.group(1) if company_match else "")
-        if not company or is_excluded(company):
-            continue
-        jobs.append(
-            {
-                "id": f"naukri_{keyword_slug}_{location_slug}_{idx}",
-                "title": _clean(title_match.group(1) if title_match else ""),
-                "company": company,
-                "location": _clean(location_match.group(1) if location_match else location),
-                "description": _clean(desc_match.group(1) if desc_match else ""),
-                "apply_url": link_match.group(1) if link_match else "",
-                "posted": "",
-                "days_ago": 3,
-                "experience": _clean(exp_match.group(1) if exp_match else ""),
-                "source": "Naukri",
-            }
-        )
-    return jobs
-
-
-def fetch_glassdoor(keyword: str, location: str) -> list[dict]:
-    """Fetch from Glassdoor using their public GraphQL job search endpoint."""
-    # Glassdoor location IDs for major Indian cities
-    location_ids = {
-        "noida": "3122268",
-        "gurgaon": "3122267", "gurugram": "3122267",
-        "delhi ncr": "3122264", "delhi": "3122264",
-        "bangalore": "3122262", "bengaluru": "3122262",
-        "hyderabad": "3122263",
-        "remote": "",
-    }
-    loc_key = location.lower()
-    loc_id = location_ids.get(loc_key, "")
-
-    payload = {
-        "operationName": "JobSearchResultsQuery",
-        "variables": {
-            "excludeJobListingIds": [],
-            "filterParams": [{"filterKey": "jobType", "values": ""}],
-            "keyword": keyword,
-            "locationId": int(loc_id) if loc_id else 0,
-            "locationType": "C" if loc_id else "N",
-            "numJobsToShow": 10,
-            "originalPageUrl": "https://www.glassdoor.co.in/Job/jobs.htm",
-            "pageCursor": None,
-            "pageNumber": 1,
-            "parameterUrlInput": f"KO0,{len(keyword)}",
-            "seoUrl": False,
-        },
-        "query": """query JobSearchResultsQuery($keyword: String, $locationId: Int, $locationType: String, $numJobsToShow: Int, $pageNumber: Int, $filterParams: [FilterParams]) {
-  jobListings(contextHolder: {searchParams: {keyword: $keyword, locationId: $locationId, locationType: $locationType, numPerPage: $numJobsToShow, pageNumber: $pageNumber, filterParams: $filterParams}}) {
-    jobListings {
-      jobview {
-        header {
-          jobTitleText
-          employerNameFromSearch
-          locationName
-          ageInDays
-          jobLink
-        }
-        job {
-          descriptionFragments
-        }
-      }
-    }
-  }
-}""",
-    }
+    """Fetch from Naukri using their JSON search API."""
     try:
-        resp = httpx.post(
-            GLASSDOOR_API,
-            json=payload,
-            headers=GLASSDOOR_HEADERS,
+        params = {
+            "noOfResults": 20,
+            "urlType": "search_by_keyword",
+            "searchType": "adv",
+            "keyword": keyword,
+            "location": location,
+            "experience": "3",
+            "k": keyword,
+            "l": location,
+            "sort": "1",  # sort by date
+        }
+        resp = httpx.get(
+            NAUKRI_API_URL,
+            params=params,
+            headers=NAUKRI_API_HEADERS,
             timeout=20,
+            follow_redirects=True,
         )
         resp.raise_for_status()
         data = resp.json()
-        listings = (
-            data.get("data", {})
-            .get("jobListings", {})
-            .get("jobListings", [])
-        )
+        job_details = data.get("jobDetails", [])
         jobs = []
-        for idx, item in enumerate(listings[:10]):
-            header = item.get("jobview", {}).get("header", {})
-            job_data = item.get("jobview", {}).get("job", {})
-            company = header.get("employerNameFromSearch", "")
+        for idx, item in enumerate(job_details[:10]):
+            company = item.get("companyName", "")
             if not company or is_excluded(company):
                 continue
-            link = header.get("jobLink", "")
-            if link and not link.startswith("http"):
-                link = "https://www.glassdoor.co.in" + link
-            desc_fragments = job_data.get("descriptionFragments", [])
-            description = _clean(" ".join(desc_fragments) if isinstance(desc_fragments, list) else str(desc_fragments))
+            title = item.get("title", "")
+            job_id = item.get("jobId", f"naukri_{idx}")
+            loc = item.get("placeholders", [{}])
+            location_str = loc[0].get("label", location) if loc else location
+            desc_parts = [item.get("jobDescription", "")]
+            for ph in item.get("placeholders", []):
+                if ph.get("type") == "experience":
+                    desc_parts.append(f"Experience: {ph.get('label', '')}")
+            description = " ".join(filter(None, desc_parts))
+            apply_url = f"https://www.naukri.com{item.get('jdURL', '')}" if item.get("jdURL") else ""
+            days_ago = item.get("footerPlaceholderLabel", "")
             jobs.append({
-                "id": f"gd_{quote_plus(keyword)}_{quote_plus(location)}_{idx}",
-                "title": header.get("jobTitleText", ""),
+                "id": f"naukri_{job_id}",
+                "title": title,
                 "company": company,
-                "location": header.get("locationName", location),
-                "description": description,
-                "apply_url": link,
-                "posted": "",
-                "days_ago": int(header.get("ageInDays", 3)),
-                "source": "Glassdoor",
+                "location": location_str,
+                "description": _clean(description),
+                "apply_url": apply_url,
+                "posted": days_ago,
+                "days_ago": freshness_score(days_ago),
+                "source": "Naukri",
             })
+        log.info("Naukri fetched %s jobs for %s/%s", len(jobs), keyword, location)
         return jobs
     except Exception as exc:
-        log.warning("Glassdoor fetch failed for %s/%s: %s", keyword, location, exc)
+        log.warning("Naukri API fetch failed for %s/%s: %s", keyword, location, exc)
         return []
 
 
@@ -319,20 +331,24 @@ def fetch_all_jobs() -> list[dict]:
             seen.add(job["id"])
             all_jobs.append(job)
 
-    # India locations: LinkedIn + Naukri + Glassdoor
+    # India: Naukri first (best for India), then LinkedIn Easy Apply
     for keyword in keywords[:4]:
         for location in india_locations:
-            for fetcher in (fetch_linkedin, fetch_naukri, fetch_glassdoor):
-                _add_jobs(fetcher(keyword.strip(), location.strip()))
-                time.sleep(0.3)
+            _add_jobs(fetch_naukri(keyword.strip(), location.strip()))
+            time.sleep(0.3)
+            _add_jobs(fetch_linkedin(keyword.strip(), location.strip()))
+            time.sleep(0.3)
 
-    # Remote / worldwide: LinkedIn remote only (others block server IPs)
+    # Remote/worldwide: LinkedIn Easy Apply remote + Indeed global remote
     for keyword in keywords[:2]:
         _add_jobs(fetch_linkedin(keyword.strip(), "Remote"))
         time.sleep(0.3)
-        _add_jobs(fetch_glassdoor(keyword.strip(), "Remote"))
+        _add_jobs(fetch_indeed_remote(keyword.strip()))
         time.sleep(0.3)
 
     all_jobs.sort(key=lambda job: (job.get("days_ago", 30), job.get("source", ""), job.get("title", "")))
-    log.info("Fetched %s raw jobs across LinkedIn, Naukri, and Glassdoor (India + Remote)", len(all_jobs))
+    log.info(
+        "Fetched %s jobs — Naukri (India) + LinkedIn Easy Apply (India+Remote) + Indeed (Remote overseas)",
+        len(all_jobs),
+    )
     return all_jobs[:max_jobs]
