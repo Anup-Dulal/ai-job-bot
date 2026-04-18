@@ -20,11 +20,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        working-directory: ai-job-bot
         run: pip install -r requirements.txt
 
       - name: Run job bot (once)
-        working-directory: ai-job-bot
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
