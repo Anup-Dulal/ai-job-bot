@@ -109,6 +109,44 @@ def _write_text_artifact(prefix: str, job: dict, content: str) -> str:
     return str(path)
 
 
+def _write_pdf_artifact(prefix: str, job: dict, content: str) -> str:
+    """Write content as a PDF file. Falls back to .md if fpdf2 not available."""
+    try:
+        from fpdf import FPDF
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=11)
+
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.startswith("# "):
+                pdf.set_font("Helvetica", "B", 16)
+                pdf.cell(0, 10, line[2:], ln=True)
+                pdf.set_font("Helvetica", size=11)
+            elif line.startswith("## "):
+                pdf.set_font("Helvetica", "B", 13)
+                pdf.ln(3)
+                pdf.cell(0, 8, line[3:], ln=True)
+                pdf.set_font("Helvetica", size=11)
+            elif line.startswith("- "):
+                pdf.cell(5, 7, "", ln=False)
+                pdf.multi_cell(0, 7, f"• {line[2:]}")
+            elif line:
+                pdf.multi_cell(0, 7, line)
+            else:
+                pdf.ln(3)
+
+        filename = f"{prefix}-{_slugify(job['company'])}-{_slugify(job['title'])}.pdf"
+        path = ARTIFACT_DIR / filename
+        pdf.output(str(path))
+        return str(path)
+    except ImportError:
+        log.warning("fpdf2 not installed — falling back to .md artifact")
+        return _write_text_artifact(prefix, job, content)
+
+
 @dataclass
 class ResumeSnapshot:
     skills: List[str]
@@ -370,7 +408,7 @@ RESUME:
         content.extend(["", "## Changes Made"])
         for change in tailored.get("changes", []):
             content.append(f"- {change}")
-        return _write_text_artifact("resume", job, "\n".join(content) + "\n")
+        return _write_pdf_artifact("resume", job, "\n".join(content) + "\n")
 
 
 class ApplicationAssistantAgent:

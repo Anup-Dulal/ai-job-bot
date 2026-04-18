@@ -57,10 +57,23 @@ def send_job_card(job: dict) -> bool:
     company = html.escape(job["company"])
     location = html.escape(job.get("location", ""))
     reason = html.escape(job.get("reason", ""))
+    source = job.get("source", "")
+    easy_apply = job.get("easy_apply", True)
+
+    # Badge: show source and apply type
+    if source == "LinkedIn" and easy_apply:
+        badge = "⚡ LinkedIn Easy Apply"
+    elif source == "Naukri":
+        badge = "🇮🇳 Naukri"
+    elif source == "Indeed":
+        badge = "🌍 Indeed Remote"
+    else:
+        badge = html.escape(source)
+
     message = (
         f"<b>{title}</b>\n"
         f"{company} | {location}\n"
-        f"Score: {job.get('score', 0)}/100\n"
+        f"{badge} | Score: {job.get('score', 0)}/100\n"
         f"{reason}\n"
         f"<a href=\"{html.escape(job.get('link', '#'))}\">Open job</a>"
     )
