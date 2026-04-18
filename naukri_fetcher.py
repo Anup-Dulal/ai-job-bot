@@ -1,8 +1,9 @@
 """
-naukri_fetcher.py — Multi-source job fetcher for LinkedIn, Naukri, and Indeed (India + Remote/Global).
+naukri_fetcher.py — Multi-source job fetcher: LinkedIn, Naukri, Glassdoor (JSON API).
 
-These adapters rely on public search endpoints and lightweight HTML parsing.
-They are intentionally defensive and may need selector updates over time.
+LinkedIn and Naukri use HTML scraping.
+Glassdoor uses their public job search JSON endpoint.
+Indeed blocks server IPs (403) so it is not used.
 """
 
 from __future__ import annotations
@@ -24,20 +25,27 @@ from resume_profile import RESUME, get_resume_text
 log = logging.getLogger("Fetcher")
 
 EXCLUDE_COMPANIES = [company.lower() for company in RESUME["ideal_job"].get("avoid", [])]
+
+# Standard browser headers
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# Glassdoor needs extra headers to avoid 403
+GLASSDOOR_HEADERS = {
+    **HEADERS,
+    "Referer": "https://www.glassdoor.co.in/",
+    "Accept": "application/json, text/plain, */*",
+}
+
 LINKEDIN_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 NAUKRI_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
-INDEED_IN_URL = "https://in.indeed.com/jobs"
-INDEED_COM_URL = "https://www.indeed.com/jobs"
-
-# LinkedIn geoIds for remote/global searches
-LINKEDIN_REMOTE_FILTER = "f_WT=2"  # work type = remote
+GLASSDOOR_API = "https://www.glassdoor.co.in/graph"
 
 
 def _http_get(url: str, *, params: dict | None = None) -> str:
@@ -202,47 +210,95 @@ def fetch_naukri(keyword: str, location: str) -> list[dict]:
     return jobs
 
 
-def fetch_indeed(keyword: str, location: str) -> list[dict]:
-    """Fetch from Indeed India or worldwide remote."""
-    if location.lower() == "remote":
-        base_url = INDEED_COM_URL
-        params = {"q": keyword, "l": "Remote", "sort": "date", "fromage": "7", "remotejob": "1"}
-    else:
-        base_url = INDEED_IN_URL
-        params = {"q": keyword, "l": location, "sort": "date", "fromage": "7"}
+def fetch_glassdoor(keyword: str, location: str) -> list[dict]:
+    """Fetch from Glassdoor using their public GraphQL job search endpoint."""
+    # Glassdoor location IDs for major Indian cities
+    location_ids = {
+        "noida": "3122268",
+        "gurgaon": "3122267", "gurugram": "3122267",
+        "delhi ncr": "3122264", "delhi": "3122264",
+        "bangalore": "3122262", "bengaluru": "3122262",
+        "hyderabad": "3122263",
+        "remote": "",
+    }
+    loc_key = location.lower()
+    loc_id = location_ids.get(loc_key, "")
 
-    html = _http_get(base_url, params=params)
-    if not html:
-        return []
-
-    job_keys = re.findall(r'data-jk="([a-f0-9]+)"', html)
-    titles = re.findall(r'class="jobTitle[^"]*"[^>]*>.*?<span[^>]*>([^<]+)</span>', html, re.DOTALL)
-    companies = re.findall(r'data-testid="company-name"[^>]*>([^<]+)', html)
-    locations_found = re.findall(r'data-testid="text-location"[^>]*>([^<]+)', html)
-    snippets = re.findall(r'class="[^"]*job-snippet[^"]*"[^>]*>([\s\S]*?)</ul>', html)
-
-    view_base = "https://www.indeed.com" if location.lower() == "remote" else "https://in.indeed.com"
-    jobs = []
-    for idx, job_key in enumerate(job_keys[:10]):
-        company = _clean(companies[idx]) if idx < len(companies) else ""
-        if not company or is_excluded(company):
-            continue
-        snippet_html = snippets[idx] if idx < len(snippets) else ""
-        description = _clean(re.sub(r"<li>", " ", snippet_html))
-        jobs.append(
-            {
-                "id": f"indeed_{job_key}",
-                "title": _clean(titles[idx]) if idx < len(titles) else "",
-                "company": company,
-                "location": _clean(locations_found[idx]) if idx < len(locations_found) else location,
-                "description": description,
-                "apply_url": f"{view_base}/viewjob?jk={job_key}",
-                "posted": "",
-                "days_ago": 3,
-                "source": "Indeed",
-            }
+    payload = {
+        "operationName": "JobSearchResultsQuery",
+        "variables": {
+            "excludeJobListingIds": [],
+            "filterParams": [{"filterKey": "jobType", "values": ""}],
+            "keyword": keyword,
+            "locationId": int(loc_id) if loc_id else 0,
+            "locationType": "C" if loc_id else "N",
+            "numJobsToShow": 10,
+            "originalPageUrl": "https://www.glassdoor.co.in/Job/jobs.htm",
+            "pageCursor": None,
+            "pageNumber": 1,
+            "parameterUrlInput": f"KO0,{len(keyword)}",
+            "seoUrl": False,
+        },
+        "query": """query JobSearchResultsQuery($keyword: String, $locationId: Int, $locationType: String, $numJobsToShow: Int, $pageNumber: Int, $filterParams: [FilterParams]) {
+  jobListings(contextHolder: {searchParams: {keyword: $keyword, locationId: $locationId, locationType: $locationType, numPerPage: $numJobsToShow, pageNumber: $pageNumber, filterParams: $filterParams}}) {
+    jobListings {
+      jobview {
+        header {
+          jobTitleText
+          employerNameFromSearch
+          locationName
+          ageInDays
+          jobLink
+        }
+        job {
+          descriptionFragments
+        }
+      }
+    }
+  }
+}""",
+    }
+    try:
+        resp = httpx.post(
+            GLASSDOOR_API,
+            json=payload,
+            headers=GLASSDOOR_HEADERS,
+            timeout=20,
         )
-    return jobs
+        resp.raise_for_status()
+        data = resp.json()
+        listings = (
+            data.get("data", {})
+            .get("jobListings", {})
+            .get("jobListings", [])
+        )
+        jobs = []
+        for idx, item in enumerate(listings[:10]):
+            header = item.get("jobview", {}).get("header", {})
+            job_data = item.get("jobview", {}).get("job", {})
+            company = header.get("employerNameFromSearch", "")
+            if not company or is_excluded(company):
+                continue
+            link = header.get("jobLink", "")
+            if link and not link.startswith("http"):
+                link = "https://www.glassdoor.co.in" + link
+            desc_fragments = job_data.get("descriptionFragments", [])
+            description = _clean(" ".join(desc_fragments) if isinstance(desc_fragments, list) else str(desc_fragments))
+            jobs.append({
+                "id": f"gd_{quote_plus(keyword)}_{quote_plus(location)}_{idx}",
+                "title": header.get("jobTitleText", ""),
+                "company": company,
+                "location": header.get("locationName", location),
+                "description": description,
+                "apply_url": link,
+                "posted": "",
+                "days_ago": int(header.get("ageInDays", 3)),
+                "source": "Glassdoor",
+            })
+        return jobs
+    except Exception as exc:
+        log.warning("Glassdoor fetch failed for %s/%s: %s", keyword, location, exc)
+        return []
 
 
 
@@ -263,23 +319,20 @@ def fetch_all_jobs() -> list[dict]:
             seen.add(job["id"])
             all_jobs.append(job)
 
-    # India-specific: LinkedIn + Naukri + Indeed India
+    # India locations: LinkedIn + Naukri + Glassdoor
     for keyword in keywords[:4]:
         for location in india_locations:
-            for fetcher in (fetch_linkedin, fetch_naukri, fetch_indeed):
+            for fetcher in (fetch_linkedin, fetch_naukri, fetch_glassdoor):
                 _add_jobs(fetcher(keyword.strip(), location.strip()))
                 time.sleep(0.3)
 
-    # Remote / worldwide: LinkedIn remote + Indeed global remote (2 keywords to save quota)
+    # Remote / worldwide: LinkedIn remote only (others block server IPs)
     for keyword in keywords[:2]:
         _add_jobs(fetch_linkedin(keyword.strip(), "Remote"))
         time.sleep(0.3)
-        _add_jobs(fetch_indeed(keyword.strip(), "Remote"))
+        _add_jobs(fetch_glassdoor(keyword.strip(), "Remote"))
         time.sleep(0.3)
 
     all_jobs.sort(key=lambda job: (job.get("days_ago", 30), job.get("source", ""), job.get("title", "")))
-    log.info(
-        "Fetched %s raw jobs across LinkedIn, Naukri, Indeed (India + Remote)",
-        len(all_jobs),
-    )
+    log.info("Fetched %s raw jobs across LinkedIn, Naukri, and Glassdoor (India + Remote)", len(all_jobs))
     return all_jobs[:max_jobs]
