@@ -1,0 +1,62 @@
+name: Daily Job Search
+
+on:
+  schedule:
+    # Runs every day at 9:00 AM IST (3:30 AM UTC)
+    - cron: "30 3 * * *"
+  workflow_dispatch: # allows manual trigger from GitHub Actions tab
+
+jobs:
+  run-job-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ai-job-bot/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r ai-job-bot/requirements.txt
+
+      - name: Run job bot (once)
+        working-directory: ai-job-bot
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROFILE_NAME: ${{ secrets.PROFILE_NAME }}
+          PROFILE_EMAIL: ${{ secrets.PROFILE_EMAIL }}
+          PROFILE_PHONE: ${{ secrets.PROFILE_PHONE }}
+          PROFILE_LOCATION: ${{ secrets.PROFILE_LOCATION }}
+          PROFILE_TITLE: ${{ secrets.PROFILE_TITLE }}
+          PROFILE_EXP_YEARS: ${{ secrets.PROFILE_EXP_YEARS }}
+          PROFILE_CURRENT_COMPANY: ${{ secrets.PROFILE_CURRENT_COMPANY }}
+          PROFILE_CURRENT_CLIENT: ${{ secrets.PROFILE_CURRENT_CLIENT }}
+          PROFILE_NOTICE: ${{ secrets.PROFILE_NOTICE }}
+          PROFILE_CTC_EXP: ${{ secrets.PROFILE_CTC_EXP }}
+          PROFILE_EDUCATION: ${{ secrets.PROFILE_EDUCATION }}
+          PROFILE_SUMMARY: ${{ secrets.PROFILE_SUMMARY }}
+          PROFILE_CERTIFICATIONS: ${{ secrets.PROFILE_CERTIFICATIONS }}
+          PROFILE_AWARDS: ${{ secrets.PROFILE_AWARDS }}
+          PROFILE_PROJECTS: ${{ secrets.PROFILE_PROJECTS }}
+          PROFILE_SKILLS_LANGUAGES: ${{ secrets.PROFILE_SKILLS_LANGUAGES }}
+          PROFILE_SKILLS_FRAMEWORKS: ${{ secrets.PROFILE_SKILLS_FRAMEWORKS }}
+          PROFILE_SKILLS_CLOUD: ${{ secrets.PROFILE_SKILLS_CLOUD }}
+          PROFILE_SKILLS_OBSERVABILITY: ${{ secrets.PROFILE_SKILLS_OBSERVABILITY }}
+          PROFILE_SKILLS_AI_TOOLS: ${{ secrets.PROFILE_SKILLS_AI_TOOLS }}
+          PROFILE_SKILLS_METHODOLOGIES: ${{ secrets.PROFILE_SKILLS_METHODOLOGIES }}
+          PROFILE_SKILLS_DATABASES: ${{ secrets.PROFILE_SKILLS_DATABASES }}
+          PROFILE_SKILLS_TOOLS: ${{ secrets.PROFILE_SKILLS_TOOLS }}
+          SEARCH_KEYWORDS: ${{ secrets.SEARCH_KEYWORDS }}
+          SEARCH_LOCATIONS: ${{ secrets.SEARCH_LOCATIONS }}
+          MIN_FIT_SCORE: "60"
+          TOP_JOBS_TO_NOTIFY: "5"
+          MAX_JOBS_PER_RUN: "50"
+          RUN_MODE: once
+        run: python scheduler.py
