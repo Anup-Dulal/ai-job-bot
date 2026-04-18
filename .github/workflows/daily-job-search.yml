@@ -9,6 +9,8 @@ on:
 jobs:
   run-job-bot:
     runs-on: ubuntu-latest
+    # Allow up to 20 minutes: ~3 min scan + 10 min poll window + buffer
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repo
@@ -22,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run job bot (once)
+      - name: Run job bot (scan + notify)
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -57,3 +59,34 @@ jobs:
           MAX_JOBS_PER_RUN: "50"
           RUN_MODE: once
         run: python scheduler.py
+
+      - name: Poll Telegram for APPLY/REJECT/SKIP replies
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROFILE_NAME: ${{ secrets.PROFILE_NAME }}
+          PROFILE_EMAIL: ${{ secrets.PROFILE_EMAIL }}
+          PROFILE_PHONE: ${{ secrets.PROFILE_PHONE }}
+          PROFILE_LOCATION: ${{ secrets.PROFILE_LOCATION }}
+          PROFILE_TITLE: ${{ secrets.PROFILE_TITLE }}
+          PROFILE_EXP_YEARS: ${{ secrets.PROFILE_EXP_YEARS }}
+          PROFILE_CURRENT_COMPANY: ${{ secrets.PROFILE_CURRENT_COMPANY }}
+          PROFILE_CURRENT_CLIENT: ${{ secrets.PROFILE_CURRENT_CLIENT }}
+          PROFILE_NOTICE: ${{ secrets.PROFILE_NOTICE }}
+          PROFILE_CTC_EXP: ${{ secrets.PROFILE_CTC_EXP }}
+          PROFILE_EDUCATION: ${{ secrets.PROFILE_EDUCATION }}
+          PROFILE_SUMMARY: ${{ secrets.PROFILE_SUMMARY }}
+          PROFILE_CERTIFICATIONS: ${{ secrets.PROFILE_CERTIFICATIONS }}
+          PROFILE_AWARDS: ${{ secrets.PROFILE_AWARDS }}
+          PROFILE_PROJECTS: ${{ secrets.PROFILE_PROJECTS }}
+          PROFILE_SKILLS_LANGUAGES: ${{ secrets.PROFILE_SKILLS_LANGUAGES }}
+          PROFILE_SKILLS_FRAMEWORKS: ${{ secrets.PROFILE_SKILLS_FRAMEWORKS }}
+          PROFILE_SKILLS_CLOUD: ${{ secrets.PROFILE_SKILLS_CLOUD }}
+          PROFILE_SKILLS_OBSERVABILITY: ${{ secrets.PROFILE_SKILLS_OBSERVABILITY }}
+          PROFILE_SKILLS_AI_TOOLS: ${{ secrets.PROFILE_SKILLS_AI_TOOLS }}
+          PROFILE_SKILLS_METHODOLOGIES: ${{ secrets.PROFILE_SKILLS_METHODOLOGIES }}
+          PROFILE_SKILLS_DATABASES: ${{ secrets.PROFILE_SKILLS_DATABASES }}
+          PROFILE_SKILLS_TOOLS: ${{ secrets.PROFILE_SKILLS_TOOLS }}
+          POLL_MINUTES: "10"
+        run: python telegram_poller.py
