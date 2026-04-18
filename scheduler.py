@@ -20,7 +20,7 @@ orchestrator = WorkflowOrchestrator()
 def run_once() -> dict:
     log.info("=" * 60)
     log.info("Pipeline started at %s", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    result = orchestrator.run_once(top_n=int(os.getenv("TOP_JOBS_TO_NOTIFY", "5")))
+    result = orchestrator.run_once(top_n=int(os.getenv("TOP_JOBS_TO_NOTIFY", "10")))
     log.info(
         "Fetched=%s Ranked=%s Shortlisted=%s NewlyNotified=%s",
         result["fetched"],

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -132,7 +133,7 @@ def _write_pdf_artifact(prefix: str, job: dict, content: str) -> str:
                 pdf.set_font("Helvetica", size=11)
             elif line.startswith("- "):
                 pdf.cell(5, 7, "", ln=False)
-                pdf.multi_cell(0, 7, f"• {line[2:]}")
+                pdf.multi_cell(0, 7, f"- {line[2:]}")
             elif line:
                 pdf.multi_cell(0, 7, line)
             else:
@@ -453,40 +454,25 @@ class ApplicationAssistantAgent:
 
 
 class NotificationAgent:
-    def notify_top_jobs(self, jobs: List[dict], top_n: int = 5) -> str:
+    def notify_top_jobs(self, jobs: List[dict], top_n: int = 10) -> str:
         selected = jobs[:top_n]
         if not selected:
             message = "No strong Java Spring Boot matches found in this run."
             send_telegram(message)
             return message
 
-        lines = ["Top job matches:"]
-        for index, job in enumerate(selected, start=1):
-            lines.append(
-                f"{index}. {job['title']} | {job['company']} | Score {job['score']}/100 | {job['reason'][:120]}"
-            )
-            lines.append(f"   APPLY {job['id']} | REJECT {job['id']} | SKIP {job['id']}")
-
-        notify_jobs(
-            [
-                {
-                    "job_id": job["id"],
-                    "job_title": job["title"],
-                    "company": job["company"],
-                    "location": job.get("location", ""),
-                    "source": job.get("source", ""),
-                    "days_ago": job.get("days_ago", 30),
-                    "decision": job.get("decision", "MAYBE"),
-                    "fit_score": job["score"],
-                    "reasoning": job["reason"],
-                    "apply_url": job.get("link", ""),
-                }
-                for job in selected
-            ]
+        # Send a brief header first
+        send_telegram(
+            f"<b>Job Bot — {len(selected)} new matches found</b>\n"
+            f"Sending each job below. Tap APPLY, REJECT, or SKIP on each one."
         )
-        for job in selected[:3]:
+
+        # Send each job as its own card with buttons
+        for job in selected:
             send_job_card(job)
-        return "\n".join(lines)
+            time.sleep(0.5)  # avoid Telegram rate limit
+
+        return f"Sent {len(selected)} job cards"
 
 
 class WorkflowOrchestrator:
