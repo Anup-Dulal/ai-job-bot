@@ -144,10 +144,13 @@ class JobScraperAgent:
         for job in raw_jobs:
             location = _normalize_text(job.get("location", ""))
             location_lc = location.lower()
-            # Keep if location matches any token, contains "remote", or location is empty/unknown
-            if expanded_tokens and not any(token in location_lc for token in expanded_tokens):
-                if "remote" not in location_lc and location_lc not in ("", "india"):
-                    continue
+            # Always keep remote jobs and jobs with no location info
+            # Only filter by location for jobs that have a specific non-remote location
+            is_remote = "remote" in location_lc or "worldwide" in location_lc or "anywhere" in location_lc
+            has_no_location = location_lc in ("", "india")
+            location_matches = any(token in location_lc for token in expanded_tokens)
+            if not is_remote and not has_no_location and not location_matches:
+                continue
             normalized.append(
                 {
                     "id": job.get("id") or _slugify(
@@ -255,7 +258,14 @@ class JobScoringAgent:
                 }
             )
             llm_score = deep_result["fit_score"] if deep_result else weighted_score
-            final_score = round(weighted_score * 0.7 + llm_score * 0.3)
+
+            # When description is empty (e.g. LinkedIn cards), the rule-based score
+            # is unreliable — trust the LLM score much more in that case.
+            has_description = bool(job.get("description", "").strip())
+            if has_description:
+                final_score = round(weighted_score * 0.7 + llm_score * 0.3)
+            else:
+                final_score = round(weighted_score * 0.2 + llm_score * 0.8)
 
             reason_parts = []
             if matched_skills:
@@ -467,6 +477,23 @@ class WorkflowOrchestrator:
             mark_notified([job["id"] for job in fresh_jobs])
             for job in fresh_jobs:
                 set_action(job["id"], "PENDING_DECISION", None)
+        else:
+            # Always send a summary so you know the bot ran
+            top3 = scored_jobs[:3]
+            if top3:
+                summary = "\n".join(
+                    f"• {j['title']} @ {j['company']} — {j['score']}/100 (below threshold or already notified)"
+                    for j in top3
+                )
+                send_telegram(
+                    f"✅ Pipeline ran — {len(scored_jobs)} jobs scored, none new above {minimum_score}.\n\n"
+                    f"Top scored this run:\n{summary}"
+                )
+            else:
+                send_telegram(
+                    f"✅ Pipeline ran — fetched {len(jobs)} jobs but none passed pre-filter. "
+                    "Check SEARCH_KEYWORDS and SEARCH_LOCATIONS env vars."
+                )
 
         log_run(
             fetched_count=len(jobs),
