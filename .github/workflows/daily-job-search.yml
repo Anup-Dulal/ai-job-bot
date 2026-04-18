@@ -18,12 +18,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-        working-directory: ai-job-bot
+        run: pip install -r ai-job-bot/requirements.txt
 
       - name: Run job bot (once)
         working-directory: ai-job-bot
