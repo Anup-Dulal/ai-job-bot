@@ -60,10 +60,11 @@ def pre_filter(jobs: list) -> list:
             dropped.append(job["title"])
             continue
 
-        # Must have at least one relevant keyword
-        if not any(kw in combined for kw in RELEVANT_KEYWORDS):
-            dropped.append(job["title"])
-            continue
+        # Must have at least one relevant keyword (check title first, then combined)
+        if not any(kw in title for kw in RELEVANT_KEYWORDS):
+            if not any(kw in combined for kw in RELEVANT_KEYWORDS):
+                dropped.append(job["title"])
+                continue
 
         # Experience range check
         if not _exp_match(combined):

@@ -125,11 +125,28 @@ class JobScraperAgent:
     def fetch_jobs(self) -> List[dict]:
         raw_jobs = fetch_all_jobs()
         location_tokens = [item.lower() for item in self.location_preferences]
+        # Build broader match tokens (e.g. "bangalore" also matches "bengaluru")
+        location_aliases = {
+            "bangalore": ["bangalore", "bengaluru", "bengalore"],
+            "delhi ncr": ["delhi", "ncr", "noida", "gurgaon", "gurugram", "faridabad"],
+            "gurgaon": ["gurgaon", "gurugram"],
+            "noida": ["noida", "greater noida"],
+        }
+        expanded_tokens: list[str] = []
+        for token in location_tokens:
+            expanded_tokens.append(token)
+            for key, aliases in location_aliases.items():
+                if token == key or token in aliases:
+                    expanded_tokens.extend(aliases)
+        expanded_tokens = list(set(expanded_tokens))
+
         normalized = []
         for job in raw_jobs:
             location = _normalize_text(job.get("location", ""))
-            if location_tokens and not any(token in location.lower() for token in location_tokens):
-                if "remote" not in location.lower():
+            location_lc = location.lower()
+            # Keep if location matches any token, contains "remote", or location is empty/unknown
+            if expanded_tokens and not any(token in location_lc for token in expanded_tokens):
+                if "remote" not in location_lc and location_lc not in ("", "india"):
                     continue
             normalized.append(
                 {

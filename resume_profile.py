@@ -78,7 +78,9 @@ def _split_env_list(name: str, fallback: list[str]) -> list[str]:
     raw = os.getenv(name, "").strip()
     if not raw:
         return fallback
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    # Support both comma and pipe as separators (Render env vars may use either)
+    separator = "|" if "|" in raw and "," not in raw else ","
+    return [item.strip() for item in raw.split(separator) if item.strip()]
 
 
 def _load_profile_file() -> Dict[str, Any]:
