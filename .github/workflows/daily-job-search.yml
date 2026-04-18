@@ -20,7 +20,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r ai-job-bot/requirements.txt
+        working-directory: ai-job-bot
+        run: pip install -r requirements.txt
 
       - name: Run job bot (once)
         working-directory: ai-job-bot
