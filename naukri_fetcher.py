@@ -34,7 +34,6 @@ HEADERS = {
 LINKEDIN_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 NAUKRI_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
 GLASSDOOR_URL = "https://www.glassdoor.co.in/Job/jobs.htm"
-ADZUNA_URL = "https://api.adzuna.com/v1/api/jobs/in/search/1"
 
 
 def _http_get(url: str, *, params: dict | None = None) -> str:
@@ -53,7 +52,8 @@ def _http_get(url: str, *, params: dict | None = None) -> str:
 def generate_keywords() -> list[str]:
     configured = os.getenv("SEARCH_KEYWORDS", "").strip()
     if configured:
-        keywords = [item.strip() for item in configured.split(",") if item.strip()]
+        separator = "|" if "|" in configured and "," not in configured else ","
+        keywords = [item.strip() for item in configured.split(separator) if item.strip()]
         if keywords:
             return keywords[:4]
 
@@ -233,49 +233,6 @@ def fetch_glassdoor(keyword: str, location: str) -> list[dict]:
     return jobs
 
 
-def fetch_adzuna(keyword: str, location: str) -> list[dict]:
-    app_id = os.getenv("ADZUNA_APP_ID", "")
-    app_key = os.getenv("ADZUNA_APP_KEY", "")
-    if not app_id or not app_key:
-        return []
-    try:
-        response = httpx.get(
-            ADZUNA_URL,
-            params={
-                "app_id": app_id,
-                "app_key": app_key,
-                "results_per_page": 15,
-                "what": keyword,
-                "where": location,
-                "sort_by": "date",
-                "max_days_old": 7,
-            },
-            headers=HEADERS,
-            timeout=20,
-        )
-        response.raise_for_status()
-        jobs = []
-        for item in response.json().get("results", []):
-            company = item.get("company", {}).get("display_name", "")
-            if is_excluded(company):
-                continue
-            jobs.append(
-                {
-                    "id": f"adzuna_{item.get('id', '')}",
-                    "title": item.get("title", ""),
-                    "company": company,
-                    "location": item.get("location", {}).get("display_name", location),
-                    "description": item.get("description", "")[:1500],
-                    "apply_url": item.get("redirect_url", ""),
-                    "posted": item.get("created", ""),
-                    "days_ago": freshness_score(item.get("created", "")),
-                    "source": "Adzuna",
-                }
-            )
-        return jobs
-    except Exception as exc:
-        log.warning("Adzuna fetch failed: %s", exc)
-        return []
 
 
 def fetch_all_jobs() -> list[dict]:
@@ -288,7 +245,6 @@ def fetch_all_jobs() -> list[dict]:
         fetch_linkedin,
         fetch_naukri,
         fetch_glassdoor,
-        fetch_adzuna,
     )
 
     for keyword in keywords[:4]:
@@ -305,5 +261,5 @@ def fetch_all_jobs() -> list[dict]:
                 time.sleep(0.3)
 
     all_jobs.sort(key=lambda job: (job.get("days_ago", 30), job.get("source", ""), job.get("title", "")))
-    log.info("Fetched %s raw jobs across LinkedIn, Naukri, Glassdoor, and Adzuna", len(all_jobs))
+    log.info("Fetched %s raw jobs across LinkedIn, Naukri, and Glassdoor", len(all_jobs))
     return all_jobs[:max_jobs]

@@ -53,7 +53,6 @@ def health():
         "pending_actions": len(orchestrator.pending_actions()),
         "integrations": {
             "telegram": bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")),
-            "adzuna": bool(os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY")),
         },
     }
 
