@@ -29,6 +29,8 @@ services:
         sync: false
       - key: PROFILE_GITHUB
         sync: false
+      - key: RUN_MODE
+        value: "loop"
       - key: SEARCH_KEYWORDS
         sync: false
       - key: SEARCH_LOCATIONS
