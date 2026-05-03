@@ -25,6 +25,12 @@ log = logging.getLogger("NaukriPlaywright")
 SESSION_FILE = Path(__file__).resolve().parent / "data" / "naukri_session.json"
 SESSION_FILE.parent.mkdir(exist_ok=True)
 
+# Sentinel to avoid retrying login multiple times in one run
+_FAILED_LOGIN_SENTINEL = Path(__file__).resolve().parent / "data" / ".naukri_login_failed"
+
+# Clear sentinel at import time (fresh run)
+_FAILED_LOGIN_SENTINEL.unlink(missing_ok=True)
+
 NAUKRI_LOGIN_URL = "https://www.naukri.com/nlogin/login"
 NAUKRI_SEARCH_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
 
@@ -84,10 +90,49 @@ def login_naukri(email: str, password: str) -> bool:
             page.goto(NAUKRI_LOGIN_URL, wait_until="networkidle", timeout=30000)
             time.sleep(2)
 
-            # Fill login form
-            page.fill('input[placeholder*="Email"]', email)
+            # Fill login form — try multiple selector patterns
+            email_selectors = [
+                'input[placeholder*="Email"]',
+                'input[placeholder*="email"]',
+                'input[type="email"]',
+                'input[name="username"]',
+                '#usernameField',
+                'input[placeholder*="Enter your"]',
+            ]
+            email_filled = False
+            for selector in email_selectors:
+                try:
+                    page.wait_for_selector(selector, timeout=5000)
+                    page.fill(selector, email)
+                    email_filled = True
+                    log.info("Filled email with selector: %s", selector)
+                    break
+                except Exception:
+                    continue
+
+            if not email_filled:
+                log.warning("Could not find email input — saving page HTML for debug")
+                log.warning("Page URL: %s", page.url)
+                log.warning("Page title: %s", page.title())
+                browser.close()
+                return False
+
             time.sleep(0.5)
-            page.fill('input[placeholder*="Password"]', password)
+
+            password_selectors = [
+                'input[placeholder*="Password"]',
+                'input[placeholder*="password"]',
+                'input[type="password"]',
+                '#passwordField',
+            ]
+            for selector in password_selectors:
+                try:
+                    page.wait_for_selector(selector, timeout=3000)
+                    page.fill(selector, password)
+                    break
+                except Exception:
+                    continue
+
             time.sleep(0.5)
             page.click('button[type="submit"]')
 
@@ -125,15 +170,26 @@ def fetch_naukri_playwright(keyword: str, location: str, max_jobs: int = 15) -> 
 
     cookies = _load_session()
     if not cookies:
-        log.info("No Naukri session found — attempting login")
+        # Only attempt login if we have credentials — do NOT retry per keyword
         email = os.getenv("NAUKRI_EMAIL", os.getenv("PROFILE_EMAIL", ""))
         password = os.getenv("NAUKRI_PASSWORD", "")
-        if email and password:
-            login_naukri(email, password)
-            cookies = _load_session()
-        if not cookies:
-            log.warning("No Naukri session available — skipping Playwright fetch")
+        if not email or not password:
+            log.warning("No Naukri credentials — skipping Playwright fetch")
             return []
+        log.info("No Naukri session found — attempting login once")
+        success = login_naukri(email, password)
+        if not success:
+            log.warning("Naukri login failed — skipping Playwright fetch for this run")
+            # Write a sentinel file so we don't retry login for every keyword
+            _FAILED_LOGIN_SENTINEL.touch()
+            return []
+        cookies = _load_session()
+        if not cookies:
+            return []
+
+    # Check if login already failed this run
+    if _FAILED_LOGIN_SENTINEL.exists():
+        return []
 
     keyword_slug = keyword.lower().replace(" ", "-")
     location_slug = location.lower().replace(" ", "-")
