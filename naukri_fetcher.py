@@ -1,10 +1,11 @@
 """
 naukri_fetcher.py — Multi-source job fetcher:
-  - Naukri JSON API  → India jobs (priority)
-  - LinkedIn         → India Easy Apply + Remote Easy Apply
-  - Indeed           → Remote/overseas jobs (indeed.com with remotejob=1)
+  - Naukri via Apify  → India jobs (priority, no login needed)
+  - Naukri HTML       → Fallback if no Apify token
+  - LinkedIn          → India Easy Apply + Remote Easy Apply
+  - Indeed            → Remote/overseas jobs
 
-LinkedIn "Open website to apply" jobs are filtered out — only Easy Apply kept.
+Set APIFY_TOKEN env var to enable Apify-based Naukri scraping.
 """
 
 from __future__ import annotations
@@ -40,6 +41,10 @@ LINKEDIN_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/
 LINKEDIN_JOB_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 NAUKRI_URL = "https://www.naukri.com/{keyword}-jobs-in-{location}"
 INDEED_URL = "https://www.indeed.com/jobs"
+
+# Apify actor for Naukri — no login needed, hits Naukri's internal API
+APIFY_NAUKRI_ACTOR = "parseforge/naukri-com-scraper"
+APIFY_RUN_URL = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
 
 
 def _http_get(url: str, *, params: dict | None = None) -> str:
@@ -246,6 +251,69 @@ def fetch_indeed_remote(keyword: str) -> list[dict]:
         return []
 
 
+def fetch_naukri_apify(keyword: str, location: str, max_items: int = 20) -> list[dict]:
+    """
+    Fetch Naukri jobs via Apify — no login, no scraping, no bot detection.
+    Requires APIFY_TOKEN env var. Free tier gives 10 results/run.
+    """
+    token = os.getenv("APIFY_TOKEN", "").strip()
+    if not token:
+        return []
+
+    try:
+        payload = {
+            "keyword": keyword,
+            "location": location,
+            "maxItems": max_items,
+            "sortBy": "date",
+        }
+        resp = httpx.post(
+            APIFY_RUN_URL.format(actor=APIFY_NAUKRI_ACTOR),
+            params={"token": token},
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=120,  # Apify runs can take up to 60s
+        )
+        resp.raise_for_status()
+        items = resp.json()
+
+        jobs = []
+        for item in items:
+            if item.get("error"):
+                continue
+            company = item.get("companyName", "")
+            if not company or is_excluded(company):
+                continue
+
+            # Apify returns structured salary, skills, etc.
+            skills_raw = item.get("skills", [])
+            skills = skills_raw if isinstance(skills_raw, list) else []
+
+            jobs.append({
+                "id": f"naukri_{item.get('jobId', '')}",
+                "title": item.get("jobTitle", ""),
+                "company": company,
+                "location": item.get("location", location),
+                "description": item.get("jobDescription", ""),
+                "apply_url": item.get("jobUrl", ""),
+                "posted": item.get("datePosted", ""),
+                "days_ago": freshness_score(item.get("datePosted", "")),
+                "experience": item.get("experience", ""),
+                "salary": item.get("salary", ""),
+                "skills": skills,
+                "company_rating": item.get("companyRating"),
+                "source": "Naukri",
+                "easy_apply": True,
+            })
+
+        log.info("Apify Naukri: %s jobs for %s/%s", len(jobs), keyword, location)
+        return jobs
+
+    except Exception as exc:
+        log.warning("Apify Naukri fetch failed for %s/%s: %s", keyword, location, exc)
+        return []
+
+
 def fetch_naukri(keyword: str, location: str) -> list[dict]:
     """Fetch from Naukri using HTML scraping with current selectors."""
     keyword_slug = keyword.lower().replace(" ", "-")
@@ -355,10 +423,15 @@ def fetch_all_jobs() -> list[dict]:
             seen.add(job["id"])
             all_jobs.append(job)
 
-    # India: Naukri first (best for India), then LinkedIn Easy Apply
+    # India: Apify Naukri (best quality, no login) → HTML Naukri fallback → LinkedIn Easy Apply
     for keyword in keywords[:4]:
         for location in india_locations:
-            _add_jobs(fetch_naukri(keyword.strip(), location.strip()))
+            apify_jobs = fetch_naukri_apify(keyword.strip(), location.strip(), max_items=15)
+            if apify_jobs:
+                _add_jobs(apify_jobs)
+            else:
+                # Fallback to HTML scraping if no Apify token
+                _add_jobs(fetch_naukri(keyword.strip(), location.strip()))
             time.sleep(0.3)
             _add_jobs(fetch_linkedin(keyword.strip(), location.strip()))
             time.sleep(0.3)
@@ -372,7 +445,7 @@ def fetch_all_jobs() -> list[dict]:
 
     all_jobs.sort(key=lambda job: (job.get("days_ago", 30), job.get("source", ""), job.get("title", "")))
     log.info(
-        "Fetched %s jobs — Naukri (India) + LinkedIn Easy Apply (India+Remote) + Indeed (Remote overseas)",
+        "Fetched %s jobs — Naukri via Apify/HTML (India) + LinkedIn Easy Apply (India+Remote) + Indeed (Remote overseas)",
         len(all_jobs),
     )
     return all_jobs[:max_jobs]
