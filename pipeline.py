@@ -120,22 +120,43 @@ def _write_pdf_artifact(prefix: str, job: dict, content: str) -> str:
         pdf.add_page()
         pdf.set_font("Helvetica", size=11)
 
+        # Usable width for safety check
+        usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+        def safe_cell(text: str, h: int = 8, bold: bool = False, size: int = 11) -> None:
+            """Write a line, truncating if it would overflow."""
+            pdf.set_font("Helvetica", "B" if bold else "", size)
+            # Truncate text to fit page width
+            max_chars = int(usable_w / (size * 0.45))  # rough char width estimate
+            if len(text) > max_chars:
+                text = text[:max_chars - 3] + "..."
+            pdf.cell(0, h, text, ln=True)
+            pdf.set_font("Helvetica", size=11)
+
+        def safe_multi_cell(text: str, h: int = 7) -> None:
+            """Write multi-line text safely."""
+            if not text.strip():
+                return
+            # Replace any characters that might cause issues
+            text = text.encode("latin-1", errors="replace").decode("latin-1")
+            try:
+                pdf.multi_cell(0, h, text)
+            except Exception:
+                # Last resort: write truncated single line
+                pdf.cell(0, h, text[:80], ln=True)
+
         for line in content.split("\n"):
             line = line.strip()
             if line.startswith("# "):
-                pdf.set_font("Helvetica", "B", 16)
-                pdf.cell(0, 10, line[2:], ln=True)
-                pdf.set_font("Helvetica", size=11)
+                safe_cell(line[2:], h=10, bold=True, size=16)
             elif line.startswith("## "):
-                pdf.set_font("Helvetica", "B", 13)
                 pdf.ln(3)
-                pdf.cell(0, 8, line[3:], ln=True)
-                pdf.set_font("Helvetica", size=11)
+                safe_cell(line[3:], h=8, bold=True, size=13)
             elif line.startswith("- "):
                 pdf.cell(5, 7, "", ln=False)
-                pdf.multi_cell(0, 7, f"- {line[2:]}")
+                safe_multi_cell(f"- {line[2:]}")
             elif line:
-                pdf.multi_cell(0, 7, line)
+                safe_multi_cell(line)
             else:
                 pdf.ln(3)
 
@@ -145,6 +166,9 @@ def _write_pdf_artifact(prefix: str, job: dict, content: str) -> str:
         return str(path)
     except ImportError:
         log.warning("fpdf2 not installed — falling back to .md artifact")
+        return _write_text_artifact(prefix, job, content)
+    except Exception as exc:
+        log.warning("PDF generation failed (%s) — falling back to .md", exc)
         return _write_text_artifact(prefix, job, content)
 
 
