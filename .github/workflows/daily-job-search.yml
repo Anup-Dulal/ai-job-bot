@@ -24,7 +24,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Playwright browsers
-        run: python -m playwright install chromium --with-deps
+        # Use --only-shell to skip system deps (libasound2 renamed in Ubuntu 24.04)
+        run: python -m playwright install chromium
         continue-on-error: true  # non-fatal if Playwright install fails
 
       - name: Run job bot (scan + notify)
