@@ -87,22 +87,28 @@ def login_naukri(email: str, password: str) -> bool:
             page = context.new_page()
 
             log.info("Navigating to Naukri login...")
-            page.goto(NAUKRI_LOGIN_URL, wait_until="networkidle", timeout=30000)
-            time.sleep(2)
+            # Use domcontentloaded — networkidle can hang on React apps
+            page.goto(NAUKRI_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
 
-            # Fill login form — try multiple selector patterns
+            # Wait for React to render the login form (up to 15s)
+            # Naukri's login form inputs are rendered by JS after page load
             email_selectors = [
                 'input[placeholder*="Email"]',
                 'input[placeholder*="email"]',
                 'input[type="email"]',
                 'input[name="username"]',
+                'input[id*="username"]',
+                'input[id*="email"]',
+                'input[id*="Email"]',
                 '#usernameField',
-                'input[placeholder*="Enter your"]',
+                'input[placeholder*="Enter your active"]',
+                'input[placeholder*="mobile"]',
             ]
+
             email_filled = False
             for selector in email_selectors:
                 try:
-                    page.wait_for_selector(selector, timeout=5000)
+                    page.wait_for_selector(selector, timeout=15000)
                     page.fill(selector, email)
                     email_filled = True
                     log.info("Filled email with selector: %s", selector)
@@ -111,9 +117,20 @@ def login_naukri(email: str, password: str) -> bool:
                     continue
 
             if not email_filled:
-                log.warning("Could not find email input — saving page HTML for debug")
-                log.warning("Page URL: %s", page.url)
-                log.warning("Page title: %s", page.title())
+                # Log what inputs ARE on the page for debugging
+                inputs = page.query_selector_all("input")
+                log.warning("Could not find email input. Found %s inputs on page:", len(inputs))
+                for inp in inputs[:5]:
+                    try:
+                        log.warning("  input: type=%s placeholder=%s id=%s name=%s",
+                            inp.get_attribute("type"),
+                            inp.get_attribute("placeholder"),
+                            inp.get_attribute("id"),
+                            inp.get_attribute("name"),
+                        )
+                    except Exception:
+                        pass
+                log.warning("Page URL: %s | Title: %s", page.url, page.title())
                 browser.close()
                 return False
 
