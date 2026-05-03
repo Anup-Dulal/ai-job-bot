@@ -574,12 +574,21 @@ class WorkflowOrchestrator:
             tailored_resume = self.resume_optimizer.tailor_resume(job)
             application_packet = self.application_assistant.prepare_application(job, tailored_resume)
             set_action(job_id, action, application_packet)
-            send_telegram(
-                f"Application packet ready for {job['title']} at {job['company']}.\n"
-                f"Resume: {application_packet['tailored_resume_path']}\n"
-                f"Cover letter: {application_packet['cover_letter_path']}\n"
-                "Review before submitting. Auto-submit is intentionally disabled."
-            )
+
+            # Attempt auto-fill via Apply Agent
+            try:
+                from apply_agent import run_apply_agent
+                run_apply_agent(job, application_packet)
+            except Exception as exc:
+                log.warning("Apply agent failed: %s — sending manual packet", exc)
+                send_telegram(
+                    f"📋 <b>Application packet ready</b> for <b>{job['title']}</b> @ {job['company']}\n\n"
+                    f"<b>Tailored Summary:</b>\n{tailored_resume.get('summary', '')}\n\n"
+                    f"<b>Key Skills:</b> {', '.join(tailored_resume.get('skills', [])[:8])}\n\n"
+                    f"<a href=\"{job.get('link', '#')}\">👉 Apply manually</a>\n\n"
+                    "⚠️ Auto-fill unavailable — apply manually."
+                )
+
             response["application_packet"] = application_packet
         else:
             set_action(job_id, action, None)
