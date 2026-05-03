@@ -1,11 +1,12 @@
 """
-telegram_poller.py — Poll Telegram for APPLY/REJECT/SKIP commands and process them.
+telegram_poller.py — Poll Telegram for inline button callbacks and text commands.
 
-Runs after the daily job scan. Polls for up to POLL_MINUTES minutes,
-processes any commands received, then exits cleanly.
+Handles:
+  - APPLY / REJECT / SKIP  → decision workflow
+  - RESUME                 → send tailored resume preview
+  - QA                     → send LLM-generated Q&A answers
 
-Usage:
-    python telegram_poller.py
+Runs after the daily job scan for POLL_MINUTES (default 10).
 """
 
 from __future__ import annotations
@@ -13,12 +14,12 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
 
 import httpx
 
+from notifier import answer_callback_query, send_telegram
 from pipeline import WorkflowOrchestrator
-from notifier import send_telegram
+from resume_profile import RESUME
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("Poller")
@@ -41,21 +42,77 @@ def _get(method: str, params: dict | None = None) -> dict:
 
 
 def _get_updates(offset: int | None = None) -> list[dict]:
-    params: dict = {"timeout": 2, "allowed_updates": ["message"]}
+    params: dict = {"timeout": 2, "allowed_updates": ["message", "callback_query"]}
     if offset is not None:
         params["offset"] = offset
     data = _get("getUpdates", params)
     return data.get("result", [])
 
 
-def _parse_command(text: str) -> dict | None:
-    """Parse 'APPLY li_123', 'REJECT li_123', 'SKIP li_123'."""
-    import re
-    text = (text or "").strip()
-    match = re.match(r"^(APPLY|REJECT|SKIP)\s+([A-Za-z0-9_\-]+)$", text, re.IGNORECASE)
-    if not match:
-        return None
-    return {"action": match.group(1).upper(), "job_id": match.group(2)}
+def _handle_resume_preview(job_id: str, orchestrator: WorkflowOrchestrator) -> None:
+    """Generate and send a tailored resume preview for a job."""
+    try:
+        from storage import get_job
+        job = get_job(job_id)
+        if not job:
+            send_telegram(f"⚠️ Job <code>{job_id}</code> not found.")
+            return
+
+        send_telegram(f"⏳ Generating tailored resume for <b>{job['title']}</b> @ {job['company']}...")
+        tailored = orchestrator.resume_optimizer.tailor_resume(job)
+
+        summary = tailored.get("summary", "")
+        skills = ", ".join(tailored.get("skills", [])[:10])
+        bullets = tailored.get("experience_bullets", [])[:5]
+        bullets_text = "\n".join(f"  - {b}" for b in bullets)
+        changes = tailored.get("changes", [])[:3]
+        changes_text = "\n".join(f"  - {c}" for c in changes)
+
+        send_telegram(
+            f"📄 <b>Tailored Resume Preview</b>\n"
+            f"<b>For:</b> {job['title']} @ {job['company']}\n\n"
+            f"<b>Summary:</b>\n{summary}\n\n"
+            f"<b>Key Skills:</b>\n{skills}\n\n"
+            f"<b>Experience Highlights:</b>\n{bullets_text}\n\n"
+            f"<b>Changes Made:</b>\n{changes_text}\n\n"
+            f"Reply <code>APPLY {job_id}</code> to generate full PDF and application packet."
+        )
+    except Exception as exc:
+        log.exception("Resume preview failed: %s", exc)
+        send_telegram(f"⚠️ Could not generate resume preview: {exc}")
+
+
+def _handle_qa_preview(job_id: str, orchestrator: WorkflowOrchestrator) -> None:
+    """Generate and send LLM Q&A answers for a job."""
+    try:
+        from storage import get_job
+        from agent import JobApplicationAgent
+        job = get_job(job_id)
+        if not job:
+            send_telegram(f"⚠️ Job <code>{job_id}</code> not found.")
+            return
+
+        agent = JobApplicationAgent()
+        common_questions = [
+            "Why do you want this role?",
+            "Describe your experience with Spring Boot",
+            "What is your expected salary?",
+            "How many years of experience do you have?",
+            "Are you open to relocation?",
+            "What is your notice period?",
+        ]
+
+        send_telegram(f"⏳ Generating Q&A for <b>{job['title']}</b> @ {job['company']}...")
+
+        lines = [f"❓ <b>Q&A for {job['title']} @ {job['company']}</b>\n"]
+        for q in common_questions:
+            answer = agent.answer_form_question(q, job_context=job)
+            lines.append(f"<b>Q:</b> {q}\n<b>A:</b> {answer}\n")
+
+        send_telegram("\n".join(lines))
+    except Exception as exc:
+        log.exception("Q&A preview failed: %s", exc)
+        send_telegram(f"⚠️ Could not generate Q&A: {exc}")
 
 
 def poll_and_process() -> None:
@@ -71,8 +128,9 @@ def poll_and_process() -> None:
     processed: set[int] = set()
 
     send_telegram(
-        f"⏳ Waiting {POLL_MINUTES} min for your APPLY/REJECT/SKIP replies.\n"
-        "Reply with e.g. <code>APPLY li_123456</code> to act on a job."
+        f"⏳ <b>Decision window open for {POLL_MINUTES} minutes.</b>\n"
+        "Tap the buttons on each job card to act.\n"
+        "📄 Preview Resume | ❓ View Q&A | ✅ Apply | ❌ Reject | ⏭ Skip"
     )
     log.info("Polling Telegram for %s minutes...", POLL_MINUTES)
 
@@ -81,7 +139,7 @@ def poll_and_process() -> None:
 
         for update in updates:
             update_id = update.get("update_id", 0)
-            # Advance offset immediately so we never re-process this update
+            # Advance offset immediately — prevents re-processing
             if offset is None or update_id >= offset:
                 offset = update_id + 1
 
@@ -89,21 +147,55 @@ def poll_and_process() -> None:
                 continue
             processed.add(update_id)
 
+            # Determine source: callback_query or message
+            callback = update.get("callback_query", {})
             message = update.get("message", {})
-            # Only process messages from the configured chat
-            if str(message.get("chat", {}).get("id", "")) != chat_id:
+
+            # Filter by chat_id
+            source_chat = (
+                str(callback.get("message", {}).get("chat", {}).get("id", ""))
+                if callback
+                else str(message.get("chat", {}).get("id", ""))
+            )
+            if source_chat != chat_id:
                 continue
 
-            text = message.get("text", "")
-            command = _parse_command(text)
-            if not command:
-                log.info("Ignored non-command message: %s", text[:50])
-                continue
+            # Parse the action
+            if callback:
+                data = (callback.get("data") or "").strip()
+                import re
+                match = re.match(r"^(apply|reject|skip|resume|qa)_(.+)$", data, re.IGNORECASE)
+                if not match:
+                    continue
+                action = match.group(1).upper()
+                job_id = match.group(2)
+                cb_id = callback.get("id", "")
+            else:
+                text = (message.get("text") or "").strip()
+                import re
+                match = re.match(r"^(APPLY|REJECT|SKIP)\s+([A-Za-z0-9_\-]+)$", text, re.IGNORECASE)
+                if not match:
+                    continue
+                action = match.group(1).upper()
+                job_id = match.group(2)
+                cb_id = ""
 
-            job_id = command["job_id"]
-            action = command["action"]
             log.info("Processing %s for job %s", action, job_id)
 
+            # Acknowledge inline button immediately
+            if cb_id:
+                answer_callback_query(cb_id, text=f"{action.title()} received!")
+
+            # Handle action
+            if action == "RESUME":
+                _handle_resume_preview(job_id, orchestrator)
+                continue
+
+            if action == "QA":
+                _handle_qa_preview(job_id, orchestrator)
+                continue
+
+            # APPLY / REJECT / SKIP
             try:
                 result = orchestrator.decide(job_id=job_id, action=action)
                 job = result.get("job", {})
@@ -126,19 +218,19 @@ def poll_and_process() -> None:
                         "⚠️ Auto-submit is disabled. Review and apply manually."
                     )
                 elif action == "REJECT":
-                    send_telegram(f"❌ Rejected: <b>{title}</b> @ {company}")
+                    send_telegram(f"❌ <b>Rejected:</b> {title} @ {company}")
                 elif action == "SKIP":
-                    send_telegram(f"⏭ Skipped: <b>{title}</b> @ {company}")
+                    send_telegram(f"⏭ <b>Skipped:</b> {title} @ {company}")
 
             except KeyError:
-                send_telegram(f"⚠️ Job ID <code>{job_id}</code> not found. It may be from a previous run.")
+                send_telegram(f"⚠️ Job <code>{job_id}</code> not found. It may be from a previous run.")
             except Exception as exc:
                 log.exception("Error processing %s %s: %s", action, job_id, exc)
                 send_telegram(f"⚠️ Error processing {action} for {job_id}: {exc}")
 
         time.sleep(POLL_INTERVAL)
 
-    send_telegram("⏰ Decision window closed. Run the bot again tomorrow for new jobs.")
+    send_telegram("⏰ Decision window closed. New jobs will arrive tomorrow at 9 AM IST.")
     log.info("Polling complete.")
 
 

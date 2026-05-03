@@ -59,8 +59,10 @@ def send_job_card(job: dict) -> bool:
     reason = html.escape(job.get("reason", ""))
     source = job.get("source", "")
     easy_apply = job.get("easy_apply", True)
+    score = job.get("score", 0)
+    job_id = job["id"]
 
-    # Badge: show source and apply type
+    # Source badge
     if source == "LinkedIn" and easy_apply:
         badge = "⚡ LinkedIn Easy Apply"
     elif source == "Naukri":
@@ -70,21 +72,34 @@ def send_job_card(job: dict) -> bool:
     else:
         badge = html.escape(source)
 
+    # Score emoji
+    score_emoji = "🔥" if score >= 80 else "✅" if score >= 65 else "🟡"
+
     message = (
-        f"<b>{title}</b>\n"
-        f"{company} | {location}\n"
-        f"{badge} | Score: {job.get('score', 0)}/100\n"
-        f"{reason}\n"
-        f"<a href=\"{html.escape(job.get('link', '#'))}\">Open job</a>"
+        f"📌 <b>{title}</b>\n"
+        f"🏢 {company}\n"
+        f"📍 {location}\n"
+        f"{score_emoji} Match Score: <b>{score}/100</b>\n"
+        f"🏷 {badge}\n"
+        f"💡 {reason}\n"
+        f"🔗 <a href=\"{html.escape(job.get('link', '#'))}\">View Job</a>"
     )
-    keyboard = {
-        "keyboard": [
-            [f"APPLY {job['id']}", f"REJECT {job['id']}", f"SKIP {job['id']}"],
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
+
+    # Inline buttons — stay attached to the message, no keyboard clutter
+    inline_keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Apply", "callback_data": f"apply_{job_id}"},
+                {"text": "❌ Reject", "callback_data": f"reject_{job_id}"},
+                {"text": "⏭ Skip", "callback_data": f"skip_{job_id}"},
+            ],
+            [
+                {"text": "📄 Preview Resume", "callback_data": f"resume_{job_id}"},
+                {"text": "❓ View Q&A", "callback_data": f"qa_{job_id}"},
+            ],
+        ]
     }
-    return send_telegram(message, reply_markup=keyboard)
+    return send_telegram(message, reply_markup=inline_keyboard)
 
 
 def notify_jobs(results: list) -> None:
@@ -115,10 +130,46 @@ def notify_jobs(results: list) -> None:
         )
 
 
+def answer_callback_query(callback_query_id: str, text: str = "") -> bool:
+    """Acknowledge a Telegram inline button press."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return False
+    try:
+        resp = httpx.post(
+            TELEGRAM_BASE.format(token=token, method="answerCallbackQuery"),
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+        return resp.is_success
+    except Exception:
+        return False
+
+
 def parse_telegram_command(update: dict) -> Optional[dict]:
+    """Parse both text commands and inline button callback queries."""
+    # Handle inline button callback
+    callback = update.get("callback_query", {})
+    if callback:
+        data = (callback.get("data") or "").strip()
+        match = re.match(r"^(apply|reject|skip|resume|qa)_(.+)$", data, re.IGNORECASE)
+        if match:
+            return {
+                "action": match.group(1).upper(),
+                "job_id": match.group(2),
+                "callback_query_id": callback.get("id", ""),
+                "is_callback": True,
+            }
+        return None
+
+    # Handle plain text commands (fallback)
     message = update.get("message", {})
     text = (message.get("text") or "").strip()
     match = re.match(r"^(APPLY|REJECT|SKIP)\s+([A-Za-z0-9_\-]+)$", text, re.IGNORECASE)
     if not match:
         return None
-    return {"action": match.group(1).upper(), "job_id": match.group(2)}
+    return {
+        "action": match.group(1).upper(),
+        "job_id": match.group(2),
+        "is_callback": False,
+    }
