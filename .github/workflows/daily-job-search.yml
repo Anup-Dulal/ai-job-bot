@@ -9,8 +9,7 @@ on:
 jobs:
   run-job-bot:
     runs-on: ubuntu-latest
-    # Allow up to 20 minutes: ~3 min scan + 10 min poll window + buffer
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repo
@@ -24,11 +23,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
+        continue-on-error: true  # non-fatal if Playwright install fails
+
       - name: Run job bot (scan + notify)
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NAUKRI_EMAIL: ${{ secrets.NAUKRI_EMAIL }}
+          NAUKRI_PASSWORD: ${{ secrets.NAUKRI_PASSWORD }}
           PROFILE_NAME: ${{ secrets.PROFILE_NAME }}
           PROFILE_EMAIL: ${{ secrets.PROFILE_EMAIL }}
           PROFILE_PHONE: ${{ secrets.PROFILE_PHONE }}
@@ -55,16 +60,18 @@ jobs:
           SEARCH_KEYWORDS: ${{ secrets.SEARCH_KEYWORDS }}
           SEARCH_LOCATIONS: ${{ secrets.SEARCH_LOCATIONS }}
           MIN_FIT_SCORE: "60"
-          TOP_JOBS_TO_NOTIFY: "5"
+          TOP_JOBS_TO_NOTIFY: "10"
           MAX_JOBS_PER_RUN: "50"
           RUN_MODE: once
         run: python scheduler.py
 
-      - name: Poll Telegram for APPLY/REJECT/SKIP replies
+      - name: Poll Telegram for replies
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NAUKRI_EMAIL: ${{ secrets.NAUKRI_EMAIL }}
+          NAUKRI_PASSWORD: ${{ secrets.NAUKRI_PASSWORD }}
           PROFILE_NAME: ${{ secrets.PROFILE_NAME }}
           PROFILE_EMAIL: ${{ secrets.PROFILE_EMAIL }}
           PROFILE_PHONE: ${{ secrets.PROFILE_PHONE }}
