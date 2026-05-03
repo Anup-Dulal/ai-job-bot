@@ -9,7 +9,7 @@ on:
 jobs:
   run-job-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repo
@@ -24,9 +24,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Playwright browsers
-        # Use --only-shell to skip system deps (libasound2 renamed in Ubuntu 24.04)
         run: python -m playwright install chromium
-        continue-on-error: true  # non-fatal if Playwright install fails
+        continue-on-error: true
 
       - name: Run job bot (scan + notify)
         env:
