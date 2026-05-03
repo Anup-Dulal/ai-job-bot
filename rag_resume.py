@@ -25,7 +25,7 @@ from resume_profile import RESUME, get_resume_text
 log = logging.getLogger("RAG")
 
 VECTOR_STORE_PATH = Path(__file__).resolve().parent / "data" / "resume_vectors"
-VECTOR_STORE_PATH.mkdir(exist_ok=True)
+VECTOR_STORE_PATH.mkdir(parents=True, exist_ok=True)
 
 
 def _is_faiss_available() -> bool:
