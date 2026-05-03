@@ -163,6 +163,22 @@ class JobScraperAgent:
 
     def fetch_jobs(self) -> List[dict]:
         raw_jobs = fetch_all_jobs()
+
+        # Augment with Playwright-scraped Naukri jobs if available
+        try:
+            from naukri_playwright import fetch_naukri_playwright
+            from naukri_fetcher import generate_keywords
+            keywords = generate_keywords()
+            india_locations = self.location_preferences[:2]
+            for keyword in keywords[:2]:
+                for location in india_locations:
+                    pw_jobs = fetch_naukri_playwright(keyword.strip(), location.strip(), max_jobs=10)
+                    if pw_jobs:
+                        log.info("Playwright added %s Naukri jobs for %s/%s", len(pw_jobs), keyword, location)
+                        raw_jobs.extend(pw_jobs)
+        except Exception as exc:
+            log.debug("Playwright scraping skipped: %s", exc)
+
         location_tokens = [item.lower() for item in self.location_preferences]
         # Build broader match tokens (e.g. "bangalore" also matches "bengaluru")
         location_aliases = {
@@ -338,6 +354,16 @@ class JobScoringAgent:
 
 class ResumeOptimizerAgent:
     def tailor_resume(self, job: dict) -> dict:
+        # Try RAG-based tailoring first
+        try:
+            from rag_resume import tailor_resume_rag
+            tailored = tailor_resume_rag(job)
+            tailored["artifact_path"] = self._write_resume_artifact(job, tailored)
+            return tailored
+        except Exception as exc:
+            log.warning("RAG tailoring failed: %s — falling back to LLM prompt", exc)
+
+        # Fallback: direct LLM prompt
         prompt = f"""Tailor this resume truthfully for the following job.
 Return ONLY JSON with keys: summary, skills, experience_bullets, projects, changes.
 
